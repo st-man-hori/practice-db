@@ -1,0 +1,55 @@
+# 操作は Makefile 経由で行う（docker compose を直接叩かない）
+#   make up DB=mysql | make up DB=postgres
+
+services:
+  mysql:
+    image: mysql:8.4.13
+    profiles: [mysql]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      TZ: Asia/Tokyo
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./db/mysql/conf.d:/etc/mysql/conf.d:ro
+      # initdb.d はファイル名順に実行される: DDL → マスタ → 後処理
+      - ./db/mysql/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./db/master/02_master.sql:/docker-entrypoint-initdb.d/02_master.sql:ro
+      - ./db/mysql/03_post_master.sql:/docker-entrypoint-initdb.d/03_post_master.sql:ro
+    healthcheck:
+      # 初期化中の一時サーバーはTCPを開かないため、TCPでの疎通 = 初期化完了
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysqladmin ping -h 127.0.0.1 -u\"$$MYSQL_USER\" --silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
+  postgres:
+    image: postgres:17.11
+    profiles: [postgres]
+    command: ["postgres", "-c", "timezone=Asia/Tokyo"]
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      TZ: Asia/Tokyo
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/postgres/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./db/master/02_master.sql:/docker-entrypoint-initdb.d/02_master.sql:ro
+      - ./db/postgres/03_post_master.sql:/docker-entrypoint-initdb.d/03_post_master.sql:ro
+    healthcheck:
+      # 初期化中の一時サーバーはUnixソケットのみで待ち受けるため、TCPで確認する
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
+volumes:
+  mysql-data:
+  postgres-data:
