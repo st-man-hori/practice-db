@@ -19,10 +19,12 @@ make up DB=postgres    # PostgreSQL を起動（両方同時に起動しても�
 make mysql             # MySQL に接続
 make psql              # PostgreSQL に接続
 
+make seed DB=mysql ROWS=1000000   # 大量データを生成（ROWS = 注文数）
+
 make reset DB=mysql    # 指定したDBのデータを消して初期状態に戻す
 make down              # 停止（データは残る）
 
-make check             # 両DBで「起動 → テーブル・マスタの確認」を行う
+make check             # 両DBで「起動 → テーブル・マスタの確認 → 少量seed → 両DBのデータ一致の確認」を行う
 make                   # コマンド一覧を表示
 ```
 
@@ -53,7 +55,7 @@ order_items  N ────── 1  orders
 
 全テーブルに `created_at` / `updated_at` があり、`updated_at` は UPDATE のたびに自動で更新されます。
 
-起動直後に入っているのは categories のマスタだけで、それ以外のテーブルは空です。大量データの生成はフェーズ2で追加します。
+起動直後に入っているのは categories のマスタだけで、それ以外のテーブルは空です。`make seed` で大量データを生成します。
 
 ### 注文ステータス
 
@@ -67,6 +69,62 @@ order_items  N ────── 1  orders
 | delivered | 配達完了 |
 | cancelled | キャンセル |
 
+## 大量データ（make seed）
+
+```sh
+make seed DB=mysql ROWS=1000000            # 注文100万件
+make seed DB=postgres ROWS=1000000 SEED=7  # シードを変えると別のデータになる
+```
+
+- 実行するたびに customers / products / orders / order_items を空にしてから作り直します（categories はそのまま）。
+- **同じ `ROWS` と `SEED` なら、何度実行しても、MySQL と PostgreSQL のどちらでも1行単位で同じデータになります。** 乱数関数は DB ごとに結果が違うので使っておらず、行番号からの整数演算（ハッシュ）で値を決めています。`make check` で両DBの一致を確認しています。
+- 生成後に統計情報を更新します（MySQL は `ANALYZE TABLE`、PostgreSQL は `VACUUM (ANALYZE)`）。
+- `ROWS` は 100〜50000000 の範囲で指定できます（既定値は 100000、`SEED` の既定値は 42）。
+
+### 件数
+
+| テーブル | 件数 |
+|---|---|
+| orders | `ROWS` |
+| customers | `ROWS / 10` |
+| products | `ROWS / 100`（最低100件） |
+| order_items | 1注文あたり1〜5件。平均 約2.38件 |
+
+order_items.id は `(order_id - 1) * 5 + 明細番号` なので欠番があります。
+
+### 分布
+
+インデックスの効き方を試せるように、列ごとに偏りを付けています。
+
+| 列 | 分布 |
+|---|---|
+| customers.prefecture | 東京都 約21% / 大阪府 約11% / 神奈川県 約9% など都市部に偏る。残り約4割は47都道府県に均等 |
+| customers.email | `user00000123@example.com` 形式。約1割は `User00000123@Example.com` のように大文字が混じる |
+| customers.created_at | 2023年の1年間に id 順で並ぶ |
+| products.category_id | 子カテゴリ（id 6〜20）に均等 |
+| products.price | 100〜99,900円（10円単位）。安い商品ほど多い |
+| orders.customer_id | id の小さい顧客ほど注文が多い（ヘビーユーザーがいる） |
+| orders.status | delivered 75% / shipped 10% / paid 8% / cancelled 5% / pending 2% |
+| orders.ordered_at | 2024-01-01〜2025-12-31 に id 順で並ぶ（id と日時が相関する） |
+| orders.updated_at | 注文から0〜7日後 |
+| order_items.product_id | id の小さい商品ほど売れる（人気商品）。同じ注文の中では重複しない |
+| order_items.quantity | 1個 70% / 2個 20% / 3個 7% / 4個 2% / 5個 1% |
+| order_items.unit_price | その商品の price |
+
+### 所要時間とディスク使用量の目安
+
+手元の環境（WSL2、メモリ7GB）で測った値です。ディスク使用量はデータディレクトリ全体（PostgreSQL は WAL の約1GBを含む）です。
+
+| ROWS | order_items | MySQL 時間 | PostgreSQL 時間 | MySQL ディスク | PostgreSQL ディスク |
+|---|---|---|---|---|---|
+| 1,000,000 | 約238万 | 63秒 | 42秒 | 0.8GB | 1.5GB |
+| 5,000,000 | 約1,190万 | 約9.5分 | 約3.3分 | 2.6GB | 3.3GB |
+| 50,000,000（上限・推定） | 約1.2億 | 数時間 | 30分〜1時間 | 約22GB | 約23GB |
+
+上限の行は実測していない推定値です。データ量は 100万件あたり約0.44GB で、件数にほぼ比例します。
+
+MySQL はキャッシュがバッファプール（既定128MB）だけなので、インデックスがメモリに乗らなくなると件数に比例する以上に遅くなります。PostgreSQL は OS のページキャッシュも使います。少しでも速くするため、my.cnf で `innodb_change_buffering = all`（8.4 で既定値が none になった）と `innodb_redo_log_capacity = 2G` を設定しています。どちらも書き込み性能に関わる設定なので、更新系の性能を測るときは考慮してください。
+
 ## ファイル構成
 
 ```
@@ -78,6 +136,10 @@ db/mysql/conf.d/my.cnf    文字コード・タイムゾーンの設定
 db/postgres/01_schema.sql PostgreSQL用DDL
 db/postgres/03_post_master.sql
 db/master/02_master.sql   マスタデータ（両DB共通）
+db/mysql/seed/            MySQL用の生成SQL（01_prepare〜06_finish）
+db/postgres/seed/         PostgreSQL用の生成SQL（生成式は MySQL 版と揃えている）
+scripts/seed.sh           make seed の実体
+scripts/fingerprint.sh    生成データの指紋（件数・列の合計）を出力する。両DBの一致確認に使う
 scripts/check.sh          make check の実体
 ```
 
@@ -98,4 +160,8 @@ scripts/check.sh          make check の実体
 | email の一意制約 | 照合順序 `utf8mb4_0900_ai_ci` のため大文字小文字を区別しない | `lower(email)` の式インデックス。**インデックスを使うには `WHERE lower(email) = ...` と書く必要がある** |
 | 文字列の比較 | 既定で大文字小文字を区別しない | 区別する |
 | 主キーとデータの格納 | InnoDB は主キーの順にデータを並べる（クラスタ化インデックス） | 主キーと関係なくヒープに格納する |
-| 統計情報の更新 | `ANALYZE TABLE t;` | `ANALYZE t;` |
+| 統計情報の更新 | `ANALYZE TABLE t;` | `ANALYZE t;`（seed では `VACUUM (ANALYZE)` で可視性マップも作る） |
+| 連番の生成（seed） | `generate_series` が無いため、再帰CTEで作った一時テーブルを使う | `generate_series` |
+| 整数の除算（seed） | `/` の結果は小数になるため `FLOOR(a / b)` | bigint 同士の `/` は切り捨て |
+| 投入中のFKチェック停止（seed） | `SET foreign_key_checks = 0` | `SET session_replication_role = replica`（トリガーも止まる） |
+| バイナリログ / WAL | 練習用のため `disable-log-bin` で無効化 | WAL は無効化できない（`pg_wal` に最大1GB程度） |

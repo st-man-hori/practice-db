@@ -3,9 +3,11 @@ COMPOSE := docker compose -p $(PROJECT)
 ALL_PROFILES := --profile mysql --profile postgres
 
 DB ?=
+ROWS ?= 100000
+SEED ?= 42
 
 .DEFAULT_GOAL := help
-.PHONY: help up down reset check mysql psql env guard-db
+.PHONY: help up down reset seed check mysql psql env guard-db
 
 help: ## コマンド一覧
 	@grep -E '^[a-z]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-8s %s\n", $$1, $$2}'
@@ -21,7 +23,10 @@ reset: env guard-db ## ボリュームを削除して初期状態で再作成 (D
 	docker volume rm -f $(PROJECT)_$(DB)-data
 	$(COMPOSE) --profile $(DB) up -d --wait
 
-check: env ## 別環境で両DBを起動し、テーブルとマスタを確認（普段のデータには触れない）
+seed: up ## 大量データを生成 (DB=... ROWS=注文数 SEED=42)。顧客・商品・注文は作り直す
+	./scripts/seed.sh $(DB) $(ROWS) $(SEED)
+
+check: env ## 別環境で両DBを起動し、テーブル・マスタ・seedを確認（普段のデータには触れない）
 	./scripts/check.sh
 
 mysql: ## MySQL クライアントで接続

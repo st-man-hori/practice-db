@@ -15,7 +15,7 @@ MySQL / PostgreSQL をローカルで切り替えて使える、SQL練習やパ�
 - make up DB=mysql|postgres   : 起動
 - make down                   : 停止
 - make reset DB=...           : ボリューム削除して再作成
-- make seed ROWS=100000       : 大量データを追加（件数指定）
+- make seed DB=... ROWS=100000 : 大量データを生成（件数指定。トランザクション系テーブルは作り直す）
 - make psql / make mysql      : クライアント接続
 - make check                  : 両DBで起動→DDL適用→少量seed→件数確認
 
